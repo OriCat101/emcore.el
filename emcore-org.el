@@ -26,8 +26,9 @@
 ;;   org-clock to TRS time tracking.  Clocking into a headline with an
 ;;   EMCORE_TICKET property (inherited; ticket number or ticketId)
 ;;   creates a running working-time entry linked to that ticket with
-;;   the headline as comment; clocking out stops it; cancelling the
-;;   clock deletes it.
+;;   the headline as comment; a non-nil EMCORE_TRACK property tracks
+;;   without a ticket; clocking out stops it; cancelling the clock
+;;   deletes it.
 
 ;;; Code:
 
@@ -275,22 +276,29 @@ per-day table), `:user' (userId, needs the trs-report permission)."
   (setq emcore-org--hd-marker nil
         emcore-active-tracking-id nil))
 
+(defun emcore-org--track-p ()
+  (let ((track (org-entry-get org-clock-marker "EMCORE_TRACK" t)))
+    (and track (not (member (downcase track) '("nil" "no" "off"))))))
+
 (defun emcore-org--clock-in ()
-  (when-let* ((ticket (org-entry-get org-clock-marker "EMCORE_TICKET" t)))
-    (condition-case err
-        (let* ((ticket-id (if (= (length ticket) 35)
-                              ticket
-                            (emcore-ticket-id ticket)))
-               (heading (org-with-point-at org-clock-hd-marker
-                          (org-get-heading t t t t)))
-               (id (emcore-start-tracking (or org-clock-start-time (current-time))
-                                          heading ticket-id)))
-          (setq emcore-active-tracking-id id
-                emcore-org--hd-marker (copy-marker org-clock-hd-marker))
-          (org-entry-put org-clock-hd-marker "EMCORE_TRACKING_ID" id)
-          (message "emcore: tracking ticket %s" ticket))
-      (error (message "emcore: clock-in sync failed: %s"
-                      (error-message-string err))))))
+  (let ((ticket (org-entry-get org-clock-marker "EMCORE_TICKET" t)))
+    (when (or ticket (emcore-org--track-p))
+      (condition-case err
+          (let* ((ticket-id (and ticket
+                                 (if (= (length ticket) 35)
+                                     ticket
+                                   (emcore-ticket-id ticket))))
+                 (heading (org-with-point-at org-clock-hd-marker
+                            (org-get-heading t t t t)))
+                 (id (emcore-start-tracking (or org-clock-start-time (current-time))
+                                            heading ticket-id)))
+            (setq emcore-active-tracking-id id
+                  emcore-org--hd-marker (copy-marker org-clock-hd-marker))
+            (org-entry-put org-clock-hd-marker "EMCORE_TRACKING_ID" id)
+            (message "emcore: tracking%s"
+                     (if ticket (format " ticket %s" ticket) " (no ticket)")))
+        (error (message "emcore: clock-in sync failed: %s"
+                        (error-message-string err)))))))
 
 (defun emcore-org--clock-out ()
   (when-let* ((id (or emcore-active-tracking-id
@@ -319,8 +327,9 @@ per-day table), `:user' (userId, needs the trs-report permission)."
   "Mirror org-clock to emcore TRS time tracking.
 Clocking into a headline with an EMCORE_TICKET property (inherited;
 ticket number or ticketId) creates a running working-time entry linked
-to that ticket, with the headline as comment.  Clocking out stops the
-entry, cancelling the clock deletes it."
+to that ticket, with the headline as comment.  A headline with a
+non-nil EMCORE_TRACK property (inherited) is tracked without a ticket.
+Clocking out stops the entry, cancelling the clock deletes it."
   :global t
   :group 'emcore
   (if emcore-org-clock-mode

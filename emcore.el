@@ -263,9 +263,10 @@ endDate percentageComplete.  Returns the recorded changes."
     (or (alist-get 'ticketId hit)
         (signal 'emcore-error (list (format "Ticket #%s not found" no))))))
 
-(defun emcore-read-ticket ()
+(defun emcore-read-ticket (&optional allow-empty)
   "Prompt for a ticket with completion; return its alist.
-Accepts a plain ticket number as free-form input."
+Accepts a plain ticket number as free-form input.  With ALLOW-EMPTY,
+empty input returns nil instead of erroring."
   (let* ((tickets (emcore-tickets "" 200))
          (cands (mapcar (lambda (tk)
                           (cons (format "#%s %s"
@@ -273,12 +274,14 @@ Accepts a plain ticket number as free-form input."
                                         (alist-get 'title tk))
                                 tk))
                         tickets))
-         (input (completing-read "Ticket: " cands))
+         (input (completing-read (if allow-empty "Ticket (optional): " "Ticket: ")
+                                 cands))
          (hit (cdr (assoc input cands))))
     (cond (hit hit)
           ((string-match "\\`#?\\([0-9]+\\)\\'" input)
            (let ((no (match-string 1 input)))
              `((ticketId . ,(emcore-ticket-id no)) (ticketNo . ,no))))
+          ((and allow-empty (string-empty-p input)) nil)
           (t (user-error "No ticket selected")))))
 
 ;;;; Ticket history (scraped — no API endpoint exists)
@@ -439,15 +442,17 @@ Returns the new timeTrackingId."
 
 ;;;###autoload
 (defun emcore-clock-in ()
-  "Start tracking working time on a ticket (standalone, without org)."
+  "Start tracking working time (standalone, without org).
+The ticket is optional; leave the prompt empty for an unlinked entry."
   (interactive)
-  (let* ((ticket (emcore-read-ticket))
+  (let* ((ticket (emcore-read-ticket t))
          (comment (read-string "Comment (optional): "))
          (id (emcore-start-tracking (current-time)
                                     (unless (string-empty-p comment) comment)
                                     (alist-get 'ticketId ticket))))
     (setq emcore-active-tracking-id id)
-    (message "emcore: tracking started on #%s" (alist-get 'ticketNo ticket))))
+    (message "emcore: tracking started%s"
+             (if ticket (format " on #%s" (alist-get 'ticketNo ticket)) ""))))
 
 ;;;###autoload
 (defun emcore-clock-out ()

@@ -81,13 +81,24 @@ an =EMCORE_TICKET= property holding the ticket number:
 - =org-clock-out= stops it
 - =org-clock-cancel= deletes it
 
+To track time without a ticket, set =EMCORE_TRACK= (also inherited) to
+any value except =nil= / =no= / =off=:
+
+#+begin_src org
+,* Meetings
+:PROPERTIES:
+:EMCORE_TRACK: t
+:END:
+#+end_src
+
 The entry id is kept in an =EMCORE_TRACKING_ID= property while running.
 If another entry is already running server-side, you are asked whether
 to stop it.
 
-Standalone (no org needed): =emcore-clock-in= (with ticket completion),
-=emcore-clock-out=, =emcore-comment= (set the running entry's comment),
-=emcore-break= (record a past break interval).
+Standalone (no org needed): =emcore-clock-in= (with ticket completion;
+leave the prompt empty for an unlinked entry), =emcore-clock-out=,
+=emcore-comment= (set the running entry's comment), =emcore-break=
+(record a past break interval).
 
 ** API notes
 Full API reference: =~/roam/20260902124805-emocore_api.org=. Highlights
