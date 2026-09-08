@@ -37,6 +37,7 @@
 (require 'json)
 (require 'auth-source)
 (require 'dom)
+(require 'parse-time)
 
 (defvar url-http-response-status)
 (defvar url-http-end-of-headers)
@@ -366,6 +367,35 @@ are Emacs time values; END nil leaves a working-time entry running."
                                       (ticketId . ,ticket-id)
                                       (userId . ,user-id)))))
 
+(defun emcore-tracking-update (id changes)
+  "Update entry ID, merging CHANGES into its current values.
+The PUT endpoint is a full replace, so unchanged fields are re-sent.
+CHANGES is a plist: `:start' and `:end' take Emacs time values (`:end'
+nil reopens the entry as running), `:comment' a string, `:ticket-id' a
+ticketId or nil to unlink the ticket."
+  (let* ((cur (emcore-tracking-get id))
+         (blank (lambda (s) (and (stringp s) (not (string-empty-p s)) s)))
+         (start (if (plist-member changes :start)
+                    (emcore--utc-minute (plist-get changes :start))
+                  (alist-get 'startUTC cur)))
+         (end (if (plist-member changes :end)
+                  (let ((e (plist-get changes :end)))
+                    (and e (emcore--utc-minute e)))
+                (funcall blank (alist-get 'endUTC cur))))
+         (comment (if (plist-member changes :comment)
+                      (plist-get changes :comment)
+                    (funcall blank (alist-get 'comment cur))))
+         (ticket (if (plist-member changes :ticket-id)
+                     (plist-get changes :ticket-id)
+                   (funcall blank (alist-get 'ticketId cur)))))
+    (emcore-request "PUT" (format "/trs/time-trackings/%s" id)
+                    :body (seq-filter #'cdr
+                                      `((type . ,(alist-get 'type cur))
+                                        (startUTC . ,start)
+                                        (endUTC . ,end)
+                                        (comment . ,comment)
+                                        (ticketId . ,ticket))))))
+
 (defun emcore-tracking-stop (id &optional end user-id)
   "Stop running entry ID at END (default: now)."
   (emcore-request "POST" (format "/trs/time-trackings/%s/stop" id)
@@ -487,6 +517,262 @@ The ticket is optional; leave the prompt empty for an unlinked entry."
                 (org-read-date t t nil "Break end"))))
   (emcore-tracking-create "break" start end)
   (message "emcore: break recorded"))
+
+;;;; Overview
+
+(defun emcore--parse-utc-minute (s)
+  "Parse a \"yyyy-MM-ddTHH:mm\" UTC timestamp into an Emacs time value."
+  (parse-iso8601-time-string (concat s ":00Z")))
+
+(defvar-keymap emcore-overview-mode-map
+  "e" #'emcore-edit-tracking
+  "i" #'emcore-clock-in
+  "o" #'emcore-clock-out)
+
+(define-derived-mode emcore-overview-mode special-mode "emcore-overview"
+  "Major mode for the emcore time-tracking overview.
+\\<emcore-overview-mode-map>Refresh with \\[revert-buffer], edit an entry with \\[emcore-edit-tracking],
+clock in/out with \\[emcore-clock-in] / \\[emcore-clock-out]."
+  (setq-local revert-buffer-function #'emcore--overview-revert))
+
+(defun emcore--overview-revert (&rest _)
+  (emcore--overview-render))
+
+(defun emcore--overview-tracking-column ()
+  (let* ((id (or emcore-active-tracking-id
+                 (alist-get 'timeTrackingId (emcore-active-tracking))))
+         (entry (and id (ignore-errors (emcore-tracking-get id)))))
+    (cons (propertize "Tracking" 'face 'bold)
+          (if (not (and entry (alist-get 'isActive entry)))
+              (list "not running")
+            (let ((elapsed (/ (float-time
+                               (time-subtract
+                                (current-time)
+                                (emcore--parse-utc-minute
+                                 (alist-get 'startUTC entry))))
+                              60))
+                  (ticket-no (alist-get 'ticketNo entry))
+                  (comment (alist-get 'comment entry)))
+              (seq-filter (lambda (s) (and s (not (string-empty-p s))))
+                          (list (emcore-format-minutes (max 0 elapsed))
+                                (and ticket-no (format "#%s" ticket-no))
+                                (and comment
+                                     (truncate-string-to-width
+                                      comment 30 nil nil t)))))))))
+
+(defun emcore--overview-bar (attained expected)
+  "A 12-cell progress bar with percentage for ATTAINED of EXPECTED minutes."
+  (let* ((frac (/ (float attained) expected))
+         (fill (if (>= frac 1.0) 12 (min 11 (floor (* 12 frac))))))
+    (format "%s%s %3d%%"
+            (make-string fill ?█)
+            (propertize (make-string (- 12 fill) ?░) 'face 'shadow)
+            (round (* 100 frac)))))
+
+(defun emcore--overview-summary-column (title start end)
+  (let* ((summary (alist-get 'summary (emcore-analysis start end)))
+         (expected (or (alist-get 'expectedMinutes summary) 0))
+         (worked (or (alist-get 'workedMinutes summary) 0))
+         (holiday (or (alist-get 'holidayMinutes summary) 0))
+         (leave (or (alist-get 'leaveMinutes summary) 0))
+         (attained (+ worked holiday leave))
+         (balance (- attained expected)))
+    (append
+     (list (propertize title 'face 'bold))
+     (mapcar (lambda (row)
+               (format "%-10s%7s" (car row) (cdr row)))
+             `(("Expected" . ,(emcore-format-minutes expected))
+               ("Holidays" . ,(emcore-format-minutes holiday))
+               ("Absences" . ,(emcore-format-minutes leave))
+               ("Worked" . ,(emcore-format-minutes worked))
+               ("Balance" . ,(concat (if (>= balance 0) "+" "")
+                                     (emcore-format-minutes balance)))))
+     (and (> expected 0)
+          (list (emcore--overview-bar attained expected))))))
+
+(defun emcore--overview-insert-columns (columns)
+  "Insert COLUMNS (lists of lines) side by side."
+  (let ((widths (mapcar (lambda (col)
+                          (apply #'max (mapcar #'string-width col)))
+                        columns))
+        (rows (apply #'max (mapcar #'length columns))))
+    (dotimes (i rows)
+      (insert (string-trim-right
+               (mapconcat
+                (lambda (n)
+                  (let* ((col (nth n columns))
+                         (cell (or (nth i col) "")))
+                    (concat cell
+                            (make-string (- (nth n widths) (string-width cell))
+                                         ?\s))))
+                (number-sequence 0 (1- (length columns)))
+                "    "))
+              "\n"))))
+
+;;;; Editing entries
+
+(defun emcore--tracking-candidates (&optional days-back)
+  "Time-tracking entries of the last DAYS-BACK days (default 7), newest first."
+  (let* ((now (current-time))
+         (days (alist-get 'days (emcore-analysis-days
+                                 (time-subtract now (* (or days-back 7) 24 3600))
+                                 (time-add now (* 24 3600)))))
+         (entries (seq-filter
+                   (lambda (e) (equal (alist-get 'source e) "timeTracking"))
+                   (apply #'append
+                          (mapcar (lambda (d) (alist-get 'entries d)) days)))))
+    (nreverse
+     (seq-uniq entries
+               (lambda (a b) (equal (alist-get 'timeTrackingId a)
+                                    (alist-get 'timeTrackingId b)))))))
+
+(defun emcore--tracking-entry-label (entry)
+  (format "%s–%s  %s"
+          (format-time-string
+           "%a %d.%m %H:%M"
+           (parse-iso8601-time-string (alist-get 'startTime entry)))
+          (if (alist-get 'isActive entry)
+              "now  "
+            (format-time-string
+             "%H:%M"
+             (parse-iso8601-time-string (alist-get 'endTime entry))))
+          (or (alist-get 'label entry) "")))
+
+(defun emcore--read-tracking (&optional prompt)
+  "Pick a recent time-tracking entry; return its timeTrackingId.
+Entries are offered newest first; the running one, if any, is the default."
+  (let* ((entries (emcore--tracking-candidates))
+         (cands (mapcar (lambda (e) (cons (emcore--tracking-entry-label e) e))
+                        entries))
+         (active (seq-find (lambda (c) (alist-get 'isActive (cdr c))) cands))
+         (table (lambda (string pred action)
+                  (if (eq action 'metadata)
+                      '(metadata (category . emcore-tracking)
+                                 (display-sort-function . identity)
+                                 (cycle-sort-function . identity))
+                    (complete-with-action action cands string pred)))))
+    (unless cands (user-error "emcore: no recent time-tracking entries"))
+    (alist-get 'timeTrackingId
+               (cdr (assoc (completing-read
+                            (format-prompt (or prompt "Entry") (car active))
+                            table nil t nil nil (car active))
+                           cands)))))
+
+;;;###autoload
+(defun emcore-edit-tracking ()
+  "Edit a recent time-tracking entry: start, end, comment, or ticket."
+  (interactive)
+  (require 'org)
+  (let* ((id (emcore--read-tracking "Edit entry"))
+         (cur (emcore-tracking-get id))
+         (running (alist-get 'isActive cur))
+         (what (completing-read "Edit: "
+                                (list "start" (if running "stop at" "end")
+                                      "comment" "ticket")
+                                nil t)))
+    (pcase what
+      ("start"
+       (emcore-tracking-update
+        id (list :start (org-read-date
+                         t t nil "Start"
+                         (emcore--parse-utc-minute (alist-get 'startUTC cur))))))
+      ((or "end" "stop at")
+       (emcore-tracking-update
+        id (list :end (org-read-date
+                       t t nil "End"
+                       (if running
+                           (current-time)
+                         (emcore--parse-utc-minute (alist-get 'endUTC cur)))))))
+      ("comment"
+       (emcore-tracking-set-comment
+        id (read-string "Comment: " (alist-get 'comment cur))))
+      ("ticket"
+       (let ((ticket (emcore-read-ticket t)))
+         (emcore-tracking-update
+          id (list :ticket-id (alist-get 'ticketId ticket))))))
+    (message "emcore: entry updated")
+    (when (derived-mode-p 'emcore-overview-mode)
+      (revert-buffer))))
+
+(defcustom emcore-overview-refresh-interval 60
+  "Seconds between automatic overview refreshes; nil disables them.
+The overview is only refreshed while its buffer is displayed."
+  :type '(choice (const :tag "Off" nil) natnum)
+  :group 'emcore)
+
+(defvar emcore--overview-timer nil)
+
+(defun emcore--overview-center ()
+  "Center the buffer's content in the window displaying it."
+  (let* ((win (get-buffer-window (current-buffer) t))
+         (avail (if win (window-body-width win) fill-column))
+         (width 0))
+    (goto-char (point-min))
+    (while (not (eobp))
+      (setq width (max width (string-width
+                              (buffer-substring-no-properties
+                               (line-beginning-position) (line-end-position)))))
+      (forward-line))
+    (let ((indent-tabs-mode nil))
+      (indent-rigidly (point-min) (point-max)
+                      (max 0 (/ (- avail width) 2))))))
+
+(defun emcore--overview-render ()
+  "Fill the (current) overview buffer, keeping point where it was."
+  (let ((today (format-time-string "%Y-%m-%d"))
+        (month-start (format-time-string "%Y-%m-01"))
+        (inhibit-read-only t)
+        (pos (point)))
+    (erase-buffer)
+    (insert "\n")
+    (emcore--overview-insert-columns
+     (list (emcore--overview-tracking-column)
+           (emcore--overview-summary-column
+            "Today"
+            (emcore--date-to-time today) (emcore--date-to-time today 1))
+           (emcore--overview-summary-column
+            "This month (to date)"
+            (emcore--date-to-time month-start)
+            (emcore--date-to-time today 1))))
+    (emcore--overview-center)
+    (goto-char (min pos (point-max)))))
+
+(defun emcore--overview-tick ()
+  (let ((buf (get-buffer "*emcore overview*")))
+    (cond ((not (buffer-live-p buf))
+           (when emcore--overview-timer
+             (cancel-timer emcore--overview-timer)
+             (setq emcore--overview-timer nil)))
+          ((get-buffer-window buf t)
+           (with-current-buffer buf
+             (with-local-quit
+               (condition-case nil
+                   (emcore--overview-render)
+                 (error nil))))))))
+
+(defun emcore--overview-start-timer ()
+  (when emcore--overview-timer
+    (cancel-timer emcore--overview-timer)
+    (setq emcore--overview-timer nil))
+  (when emcore-overview-refresh-interval
+    (setq emcore--overview-timer
+          (run-at-time emcore-overview-refresh-interval
+                       emcore-overview-refresh-interval
+                       #'emcore--overview-tick))))
+
+;;;###autoload
+(defun emcore-overview ()
+  "Show the running entry plus today's and this month's time summary.
+While displayed, the buffer refreshes itself every
+`emcore-overview-refresh-interval' seconds."
+  (interactive)
+  (let ((buf (get-buffer-create "*emcore overview*")))
+    (pop-to-buffer buf)
+    (with-current-buffer buf
+      (unless (derived-mode-p 'emcore-overview-mode)
+        (emcore-overview-mode))
+      (emcore--overview-render))
+    (emcore--overview-start-timer)))
 
 (provide 'emcore)
 ;;; emcore.el ends here

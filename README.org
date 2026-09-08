@@ -100,6 +100,19 @@ leave the prompt empty for an unlinked entry), =emcore-clock-out=,
 =emcore-comment= (set the running entry's comment), =emcore-break=
 (record a past break interval).
 
+=M-x emcore-overview= pops up a buffer mirroring the ERP dashboard
+widget: the running entry (elapsed time, ticket, comment) and the
+expected/worked/balance summary for today and the month to date, each
+with a progress bar. While displayed it refreshes itself every
+=emcore-overview-refresh-interval= seconds (default 60; nil turns it
+off). =g= refreshes manually; =i= / =o= clock in and out, =e= edits an
+entry.
+
+=M-x emcore-edit-tracking= (also on =e= in the overview) picks one of
+the last week's entries — the running one is the default — and edits
+its start, end (stopping a running entry at a chosen time), comment,
+or linked ticket (empty ticket input unlinks).
+
 ** API notes
 Full API reference: =~/roam/20260902124805-emocore_api.org=. Highlights
 the package builds on:
