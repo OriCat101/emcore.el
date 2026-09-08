@@ -3,6 +3,8 @@ Emacs client for the emcore ERP (=erp.emotions.ch=) REST API: org-mode
 ticket blocks, TRS time tracking mirrored from org-clock, and time
 analysis reports.
 
+[[file:screenshot.png]]
+
 ** Setup
 *** Credentials
 Add an auth-source entry (e.g. =~/.authinfo.gpg=):
