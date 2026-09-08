@@ -113,7 +113,8 @@ entry.
 =M-x emcore-edit-tracking= (also on =e= in the overview) picks one of
 the last week's entries — the running one is the default — and edits
 its start, end (stopping a running entry at a chosen time), comment,
-or linked ticket (empty ticket input unlinks).
+linked ticket (empty ticket input unlinks), or type (working-time ↔
+break).
 
 ** API notes
 Full API reference: =~/roam/20260902124805-emocore_api.org=. Highlights

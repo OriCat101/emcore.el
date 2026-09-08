@@ -372,9 +372,13 @@ are Emacs time values; END nil leaves a working-time entry running."
 The PUT endpoint is a full replace, so unchanged fields are re-sent.
 CHANGES is a plist: `:start' and `:end' take Emacs time values (`:end'
 nil reopens the entry as running), `:comment' a string, `:ticket-id' a
-ticketId or nil to unlink the ticket."
+ticketId or nil to unlink the ticket, `:type' \"working-time\" or
+\"break\"."
   (let* ((cur (emcore-tracking-get id))
          (blank (lambda (s) (and (stringp s) (not (string-empty-p s)) s)))
+         (type (if (plist-member changes :type)
+                   (plist-get changes :type)
+                 (alist-get 'type cur)))
          (start (if (plist-member changes :start)
                     (emcore--utc-minute (plist-get changes :start))
                   (alist-get 'startUTC cur)))
@@ -390,7 +394,7 @@ ticketId or nil to unlink the ticket."
                    (funcall blank (alist-get 'ticketId cur)))))
     (emcore-request "PUT" (format "/trs/time-trackings/%s" id)
                     :body (seq-filter #'cdr
-                                      `((type . ,(alist-get 'type cur))
+                                      `((type . ,type)
                                         (startUTC . ,start)
                                         (endUTC . ,end)
                                         (comment . ,comment)
@@ -668,7 +672,7 @@ Entries are offered newest first; the running one, if any, is the default."
          (running (alist-get 'isActive cur))
          (what (completing-read "Edit: "
                                 (list "start" (if running "stop at" "end")
-                                      "comment" "ticket")
+                                      "comment" "ticket" "type")
                                 nil t)))
     (pcase what
       ("start"
@@ -689,7 +693,15 @@ Entries are offered newest first; the running one, if any, is the default."
       ("ticket"
        (let ((ticket (emcore-read-ticket t)))
          (emcore-tracking-update
-          id (list :ticket-id (alist-get 'ticketId ticket))))))
+          id (list :ticket-id (alist-get 'ticketId ticket)))))
+      ("type"
+       (let ((type (completing-read
+                    "Type: " '("working-time" "break") nil t nil nil
+                    (if (equal (alist-get 'type cur) "break")
+                        "working-time" "break"))))
+         (when (and running (equal type "break"))
+           (user-error "emcore: a break needs an end — stop the entry first"))
+         (emcore-tracking-update id (list :type type)))))
     (message "emcore: entry updated")
     (when (derived-mode-p 'emcore-overview-mode)
       (revert-buffer))))
